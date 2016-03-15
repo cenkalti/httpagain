@@ -35,6 +35,7 @@ func handleSleep(w http.ResponseWriter, r *http.Request) {
 func sleepAndLog(w http.ResponseWriter, duration time.Duration) {
 	pid := os.Getpid()
 	fmt.Fprintf(w, "pid: %d sleeping for %s...\n", pid, duration)
+	w.(http.Flusher).Flush()
 	time.Sleep(duration)
 	fmt.Fprintf(w, "pid: %d slept for %s\n", pid, duration)
 }

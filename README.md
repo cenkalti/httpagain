@@ -3,9 +3,13 @@
 httpagain is for building HTTP servers that restarts gracefully.
 This is possible thanks to https://github.com/rcrowley/goagain.
 
+
 Send SIGUSR2 to a process and it will restart without downtime.
 httpagain uses double-fork strategy as default to keep same PID after restart.
 This plays nicely with process managers such as upstart, supervisord, etc.
+
+
+Send SIGTERM for graceful shutdown.
 
 
 

@@ -3,6 +3,7 @@
 // Send SIGUSR2 to a process and it will restart without downtime.
 // httpagain uses double-fork strategy as default to keep same PID after restart.
 // This plays nicely with process managers such as upstart, supervisord, etc.
+// Send SIGTERM for graceful shutdown.
 package httpagain
 
 import (
@@ -17,6 +18,12 @@ import (
 
 	"github.com/rcrowley/goagain"
 )
+
+// GracePeriod is the duration to wait for active requests and running goroutines
+// to finish before restarting/shutting down the server.
+var GracePeriod = 30 * time.Second
+
+const breakAcceptInterval = 100 * time.Millisecond
 
 var goroutineWG sync.WaitGroup
 
@@ -81,17 +88,25 @@ func ListenAndServe(addr string, srv *http.Server) {
 		log.Fatalln(err)
 	}
 
-	// Signal the goroutine to stop accepting connections.
+	// Signal the goroutine to stop accepting connections and wait for acceptLoop() to finish.
+	// This does not take more than breakAcceptInterval.
 	close(stopAccept)
-
-	// Wait for acceptLoop() to finish.
 	acceptWG.Wait()
 
-	// Wait for current connections to finish.
-	requestWG.Wait()
+	// Wait for active requests and goroutines to finish.
+	done := make(chan struct{})
+	go func() {
+		requestWG.Wait()
+		goroutineWG.Wait()
+		close(done)
+	}()
 
-	// Wait for spawned goroutines to finish.
-	goroutineWG.Wait()
+	select {
+	case <-time.After(GracePeriod):
+		log.Println("some requests/goroutines did not finish in allowed period, they will be killed")
+	case <-done:
+		// Requests/goroutines are finished in allowed time.
+	}
 
 	// If we received SIGUSR2, re-exec the parent process.
 	if goagain.SIGUSR2 == sig {
@@ -120,7 +135,7 @@ func acceptLoop(l net.Listener, stopAccept chan struct{}, srv *http.Server, acce
 
 		// Set a deadline so Accept doesn't block forever, which gives
 		// us an opportunity to stop gracefully.
-		err := l.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
+		err := l.(*net.TCPListener).SetDeadline(time.Now().Add(breakAcceptInterval))
 		if err != nil {
 			log.Fatalln(err)
 		}
