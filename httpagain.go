@@ -18,7 +18,7 @@ import (
 	"github.com/rcrowley/goagain"
 )
 
-var requestsWG sync.WaitGroup
+var goroutineWG sync.WaitGroup
 
 func init() {
 	// Use double-fork strategy from goagain package.
@@ -31,15 +31,11 @@ func init() {
 }
 
 // Begin must be called before spawning new goroutine from request handlers.
-func Begin() {
-	requestsWG.Add(1)
-}
+func Begin() { goroutineWG.Add(1) }
 
 // End must be called at the end of goroutines spawned from request handlers.
 // It is recommended to call End() at the beginning of a goroutine with a defer statement.
-func End() {
-	requestsWG.Done()
-}
+func End() { goroutineWG.Done() }
 
 // ListenAndServe is similar to http.ListenAndServe.
 // It listens on the TCP network address addr then calls srv.Serve to handle requests on incoming connections.
@@ -56,24 +52,21 @@ func ListenAndServe(addr string, srv *http.Server) {
 	}
 
 	// Inherit a net.Listener from our parent process or listen anew.
-	ch := make(chan struct{})
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
+	stopAccept := make(chan struct{})
+	var acceptWG, requestWG sync.WaitGroup
+	acceptWG.Add(1)
 	l, err := goagain.Listener()
 	if err != nil {
-		// Listen on a TCP or a UNIX domain socket (TCP here).
 		l, err = net.Listen("tcp", addr)
 		if err != nil {
 			log.Fatalln(err)
 		}
-		log.Println("listening on", l.Addr())
 
-		// Accept connections in a new goroutine.
-		go serve(l, ch, srv, wg)
+		log.Println("listening on", l.Addr())
+		go acceptLoop(l, stopAccept, srv, &acceptWG, &requestWG)
 	} else {
-		// Resume listening and accepting connections in a new goroutine.
 		log.Println("resuming listening on", l.Addr())
-		go serve(l, ch, srv, wg)
+		go acceptLoop(l, stopAccept, srv, &acceptWG, &requestWG)
 
 		// If this is the child, send the parent SIGUSR2.  If this is the
 		// parent, send the child SIGQUIT.
@@ -88,14 +81,17 @@ func ListenAndServe(addr string, srv *http.Server) {
 		log.Fatalln(err)
 	}
 
-	// Do whatever's necessary to ensure a graceful exit like waiting for
-	// goroutines to terminate or a channel to become closed.
-	//
-	// In this case, we'll close the channel to signal the goroutine to stop
-	// accepting connections and wait for the goroutine to exit.
-	close(ch)
-	wg.Wait()
-	requestsWG.Wait()
+	// Signal the goroutine to stop accepting connections.
+	close(stopAccept)
+
+	// Wait for acceptLoop() to finish.
+	acceptWG.Wait()
+
+	// Wait for current connections to finish.
+	requestWG.Wait()
+
+	// Wait for spawned goroutines to finish.
+	goroutineWG.Wait()
 
 	// If we received SIGUSR2, re-exec the parent process.
 	if goagain.SIGUSR2 == sig {
@@ -105,19 +101,19 @@ func ListenAndServe(addr string, srv *http.Server) {
 	}
 }
 
-func serve(l net.Listener, ch chan struct{}, srv *http.Server, wg *sync.WaitGroup) {
+func acceptLoop(l net.Listener, stopAccept chan struct{}, srv *http.Server, acceptWG, requestWG *sync.WaitGroup) {
 	// Wrap original handler so it decrements the wait group counter after handling the request.
 	srvCopy := *srv
 	srv = &srvCopy
-	srv.Handler = wrapHandler(srv.Handler, wg)
+	srv.Handler = wrapHandler(srv.Handler, requestWG)
 
-	defer wg.Done()
+	defer acceptWG.Done()
 	for {
 
 		// Break out of the accept loop on the next iteration after the
 		// process was signaled and our channel was closed.
 		select {
-		case <-ch:
+		case <-stopAccept:
 			return
 		default:
 		}
@@ -141,7 +137,7 @@ func serve(l net.Listener, ch chan struct{}, srv *http.Server, wg *sync.WaitGrou
 		}
 
 		// Server will spawn a goroutine for connection and will return with errSingleListen.
-		wg.Add(1)
+		requestWG.Add(1)
 		sl := &singleListener{l: l, conn: c}
 		err = srv.Serve(sl)
 		if err == errSingleListen {
