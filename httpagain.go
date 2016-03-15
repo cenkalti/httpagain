@@ -18,6 +18,8 @@ import (
 	"github.com/rcrowley/goagain"
 )
 
+var requestsWG sync.WaitGroup
+
 func init() {
 	// Use double-fork strategy from goagain package.
 	// After restart pid does not changes.
@@ -26,6 +28,17 @@ func init() {
 
 	log.SetFlags(log.Lmicroseconds | log.Lshortfile)
 	log.SetPrefix(fmt.Sprintf("pid:%d ", syscall.Getpid()))
+}
+
+// Begin must be called before spawning new goroutine from request handlers.
+func Begin() {
+	requestsWG.Add(1)
+}
+
+// End must be called at the end of goroutines spawned from request handlers.
+// It is recommended to call End() at the beginning of a goroutine with a defer statement.
+func End() {
+	requestsWG.Done()
 }
 
 // ListenAndServe is similar to http.ListenAndServe.
@@ -82,6 +95,7 @@ func ListenAndServe(addr string, srv *http.Server) {
 	// accepting connections and wait for the goroutine to exit.
 	close(ch)
 	wg.Wait()
+	requestsWG.Wait()
 
 	// If we received SIGUSR2, re-exec the parent process.
 	if goagain.SIGUSR2 == sig {
