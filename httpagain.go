@@ -18,15 +18,24 @@ import (
 	"github.com/rcrowley/goagain"
 )
 
-// GracePeriod is the duration to wait for active requests and running goroutines
-// to finish before restarting/shutting down the server. Set 0 to disable.
-var GracePeriod = 30 * time.Second
+var (
+	// RequestGracePeriod is the duration to wait for active requests
+	// to finish before restarting/shutting down the server. Set 0 to wait indefinitely.
+	RequestGracePeriod = 30 * time.Second
 
-// TCPReadTimeout for read operations on connections. Set 0 to disable.
-var TCPReadTimeout = 30 * time.Second
+	// GoroutineGracePeriod is the duration to wait for running goroutines (tracked with Begin() and End() calls)
+	// to finish before restarting/shutting down the server. Set 0 to wait indefinitely.
+	GoroutineGracePeriod = 30 * time.Second
 
-// TCPWriteTimeout for write operations on connections. Set 0 to disable.
-var TCPWriteTimeout = 30 * time.Second
+	// TCPReadTimeout for read operations on connections. Set 0 to disable.
+	TCPReadTimeout = 30 * time.Second
+
+	// TCPWriteTimeout for write operations on connections. Set 0 to disable.
+	TCPWriteTimeout = 30 * time.Second
+
+	// Shutdown channel will be closed when a signal is received.
+	Shutdown = make(chan struct{})
+)
 
 const breakAcceptInterval = 100 * time.Millisecond
 
@@ -63,9 +72,14 @@ func ListenAndServe(addr string, srv *http.Server) {
 		srv = &http.Server{Addr: addr, Handler: http.DefaultServeMux}
 	}
 
-	// Inherit a net.Listener from our parent process or listen anew.
-	stopAccept := make(chan struct{})
 	var acceptWG, requestWG sync.WaitGroup
+
+	// Wrap original request handler to track active requests.
+	var srvCopy = *srv
+	srv = &srvCopy
+	srv.Handler = wrapHandler(srv.Handler, &requestWG)
+
+	// Inherit a net.Listener from our parent process or listen anew.
 	acceptWG.Add(1)
 	l, err := goagain.Listener()
 	if err != nil {
@@ -75,10 +89,10 @@ func ListenAndServe(addr string, srv *http.Server) {
 		}
 
 		log.Println("listening on", l.Addr())
-		go acceptLoop(l, stopAccept, srv, &acceptWG, &requestWG)
+		go acceptLoop(l, srv, &acceptWG, &requestWG)
 	} else {
 		log.Println("resuming listening on", l.Addr())
-		go acceptLoop(l, stopAccept, srv, &acceptWG, &requestWG)
+		go acceptLoop(l, srv, &acceptWG, &requestWG)
 
 		// If this is the child, send the parent SIGUSR2.  If this is the
 		// parent, send the child SIGQUIT.
@@ -95,28 +109,14 @@ func ListenAndServe(addr string, srv *http.Server) {
 
 	// Signal the goroutine to stop accepting connections and wait for acceptLoop() to finish.
 	// This does not take more than breakAcceptInterval.
-	close(stopAccept)
-	acceptWG.Wait()
+	close(Shutdown)
 
-	// Wait for active requests and goroutines to finish.
-	done := make(chan struct{})
-	go func() {
-		requestWG.Wait()
-		goroutineWG.Wait()
-		close(done)
-	}()
-
-	var graceDone <-chan time.Time
-	if GracePeriod > 0 {
-		graceDone = time.After(GracePeriod)
-	}
-
-	select {
-	case <-graceDone:
-		log.Println("some requests/goroutines did not finish in allowed period, they will be killed")
-	case <-done:
-		// Requests/goroutines are finished in allowed time.
-	}
+	var allDoneWG sync.WaitGroup
+	allDoneWG.Add(3)
+	go timeoutWaitGroup(&allDoneWG, &acceptWG, 0, "")
+	go timeoutWaitGroup(&allDoneWG, &requestWG, RequestGracePeriod, "some requests did not finish in allowed period, they will be killed")
+	go timeoutWaitGroup(&allDoneWG, &goroutineWG, GoroutineGracePeriod, "some goroutines did not finish in allowed period, they will be killed")
+	allDoneWG.Wait()
 
 	// If we received SIGUSR2, re-exec the parent process.
 	if goagain.SIGUSR2 == sig {
@@ -126,19 +126,32 @@ func ListenAndServe(addr string, srv *http.Server) {
 	}
 }
 
-func acceptLoop(l net.Listener, stopAccept chan struct{}, srv *http.Server, acceptWG, requestWG *sync.WaitGroup) {
-	// Wrap original handler so it decrements the wait group counter after handling the request.
-	srvCopy := *srv
-	srv = &srvCopy
-	srv.Handler = wrapHandler(srv.Handler, requestWG)
+func timeoutWaitGroup(allDoneWG, wg *sync.WaitGroup, timeout time.Duration, timeoutMsg string) {
+	doneWG := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneWG)
+	}()
+	var timeoutChan <-chan time.Time
+	if timeout > 0 {
+		timeoutChan = time.After(timeout)
+	}
+	select {
+	case <-doneWG:
+	case <-timeoutChan:
+		log.Println(timeoutMsg)
+	}
+	allDoneWG.Done()
+}
 
+func acceptLoop(l net.Listener, srv *http.Server, acceptWG, requestWG *sync.WaitGroup) {
 	defer acceptWG.Done()
 	for {
 
 		// Break out of the accept loop on the next iteration after the
 		// process was signaled and our channel was closed.
 		select {
-		case <-stopAccept:
+		case <-Shutdown:
 			return
 		default:
 		}
