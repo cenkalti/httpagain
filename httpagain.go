@@ -22,6 +22,12 @@ import (
 // to finish before restarting/shutting down the server.
 var GracePeriod = 30 * time.Second
 
+// TCPReadTimeout for read operations on connections.
+var TCPReadTimeout = 30 * time.Second
+
+// TCPWriteTimeout for write operations on connections.
+var TCPWriteTimeout = 30 * time.Second
+
 const breakAcceptInterval = 100 * time.Millisecond
 
 var goroutineWG sync.WaitGroup

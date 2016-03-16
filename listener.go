@@ -22,7 +22,13 @@ func (s *singleListener) Accept() (net.Conn, error) {
 		c = s.conn
 	})
 	if c != nil {
-		return c, nil
+		// Wrap net.Listener, storing timeout parameters.
+		tc := &timeoutConn{
+			Conn:         c,
+			readTimeout:  TCPReadTimeout,
+			writeTimeout: TCPWriteTimeout,
+		}
+		return tc, nil
 	}
 	return nil, errSingleListen
 }
