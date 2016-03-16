@@ -19,13 +19,13 @@ import (
 )
 
 // GracePeriod is the duration to wait for active requests and running goroutines
-// to finish before restarting/shutting down the server.
+// to finish before restarting/shutting down the server. Set 0 to disable.
 var GracePeriod = 30 * time.Second
 
-// TCPReadTimeout for read operations on connections.
+// TCPReadTimeout for read operations on connections. Set 0 to disable.
 var TCPReadTimeout = 30 * time.Second
 
-// TCPWriteTimeout for write operations on connections.
+// TCPWriteTimeout for write operations on connections. Set 0 to disable.
 var TCPWriteTimeout = 30 * time.Second
 
 const breakAcceptInterval = 100 * time.Millisecond
@@ -106,8 +106,13 @@ func ListenAndServe(addr string, srv *http.Server) {
 		close(done)
 	}()
 
+	var graceDone <-chan time.Time
+	if GracePeriod > 0 {
+		graceDone = time.After(GracePeriod)
+	}
+
 	select {
-	case <-time.After(GracePeriod):
+	case <-graceDone:
 		log.Println("some requests/goroutines did not finish in allowed period, they will be killed")
 	case <-done:
 		// Requests/goroutines are finished in allowed time.
